@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-
+use std::env;
 
 #[derive(Debug)]
 struct Profile {
@@ -27,7 +27,12 @@ struct CodeFile {
 
 
 fn main() {
-    let mut client = postgres::Client::connect("host=localhost user=glot password=glot", postgres::NoTls).unwrap();
+    let psql_user = env::var("PSQL_USER").unwrap();
+    let psql_pass = env::var("PSQL_PASS").unwrap();
+    let couchdb_base_url = env::var("COUCHDB_BASE_URL").unwrap();
+
+    let conn_str = format!("host=localhost user={} password={}", psql_user, psql_pass);
+    let mut client = postgres::Client::connect(&conn_str, postgres::NoTls).unwrap();
 
     let profiles = client.query("SELECT user_id, snippets_api_id, username FROM profile", &[])
         .unwrap()
@@ -44,17 +49,17 @@ fn main() {
         .collect::<HashMap<String, Profile>>();
 
 
-    process_loop(None, 0, profiles, client)
+    process_loop(None, 0, profiles, client, &couchdb_base_url)
 }
 
-fn process_loop(start_key: Option<String>, rows_processed: usize, profiles: HashMap<String, Profile>, mut client: postgres::Client) {
-    let documents = get_documents(start_key, 1000);
+fn process_loop(start_key: Option<String>, rows_processed: usize, profiles: HashMap<String, Profile>, mut client: postgres::Client, couchdb_base_url: &str) {
+    let documents = get_documents(couchdb_base_url, start_key, 1000);
     let documents_count = documents.rows.len();
 
     println!("Processed {} of {}", rows_processed, documents.total_rows);
 
     if documents_count > 0 {
-        process_loop(process_rows(documents.rows, &profiles, &mut client), rows_processed + documents_count, profiles, client);
+        process_loop(process_rows(documents.rows, &profiles, &mut client), rows_processed + documents_count, profiles, client, couchdb_base_url);
     }
 }
 
@@ -108,10 +113,12 @@ fn process_rows(rows: Vec<CouchRow>, profiles: &HashMap<String, Profile>, client
 }
 
 
-fn get_documents(optional_start_key: Option<String>, limit: u64) -> CouchResponse {
+fn get_documents(couchdb_base_url: &str, optional_start_key: Option<String>, limit: u64) -> CouchResponse {
+    let url = format!("{}/snippets/_all_docs", couchdb_base_url);
+
     let response = match optional_start_key {
         Some(start_key) => {
-            ureq::get("http://localhost:5985/snippets/_all_docs")
+            ureq::get(&url)
                 .query("descending", "false")
                 .query("limit", &limit.to_string())
                 .query("startkey", &format!("\"{}\"", start_key))
@@ -122,7 +129,7 @@ fn get_documents(optional_start_key: Option<String>, limit: u64) -> CouchRespons
         }
 
         None => {
-            ureq::get("http://localhost:5985/snippets/_all_docs")
+            ureq::get(&url)
                 .query("descending", "false")
                 .query("limit", &limit.to_string())
                 .query("skip", "1") // Skip design document
